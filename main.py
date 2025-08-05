@@ -1,5 +1,4 @@
-print("API_KEY:", API_KEY)
-print("API_SECRET:", API_SECRET)
+
 
 
 from flask import Flask, request, jsonify
@@ -11,6 +10,9 @@ app = Flask(__name__)
 # Get API keys from environment variables
 API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
+
+print("API_KEY:", API_KEY)
+print("API_SECRET:", API_SECRET)
 
 # Force Binance.US endpoint
 client = Client(API_KEY, API_SECRET, tld='us')
