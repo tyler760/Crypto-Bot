@@ -8,9 +8,6 @@ app = Flask(__name__)
 API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
 
-# ✅ Now it's safe to print
-print("API_KEY:", API_KEY)
-print("API_SECRET:", API_SECRET)
 
 # Use Binance.US endpoint
 client = Client(API_KEY, API_SECRET, tld='us')
