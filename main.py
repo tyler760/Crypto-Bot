@@ -4,9 +4,11 @@ import os
 
 app = Flask(__name__)
 
+# Get API keys from environment variables
 API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
 
+# Force Binance.US endpoint
 client = Client(API_KEY, API_SECRET, tld='us')
 
 @app.route("/webhook", methods=["POST"])
