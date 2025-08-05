@@ -1,26 +1,30 @@
-
-
-
 from flask import Flask, request, jsonify
 from binance.client import Client
 import os
 
 app = Flask(__name__)
 
-# Get API keys from environment variables
+# Get API keys from environment
 API_KEY = os.environ.get("API_KEY")
 API_SECRET = os.environ.get("API_SECRET")
 
+# ✅ Now it's safe to print
 print("API_KEY:", API_KEY)
 print("API_SECRET:", API_SECRET)
 
-# Force Binance.US endpoint
+# Use Binance.US endpoint
 client = Client(API_KEY, API_SECRET, tld='us')
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Webhook bot is running!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
     try:
+        data = request.json
+        print("Webhook data received:", data)
+
         action = data.get("action")
         symbol = data.get("symbol")
         qty = float(data.get("qty"))
@@ -37,8 +41,8 @@ def webhook():
             return jsonify({"error": "Invalid action"}), 400
 
     except Exception as e:
+        print("Error:", str(e))
         return jsonify({"error": str(e)}), 500
 
-@app.route("/", methods=["GET"])
-def home():
-    return "Webhook bot is running!"
+if __name__ == "__main__":
+    app.run(debug=True)
