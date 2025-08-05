@@ -1,3 +1,7 @@
+print("API_KEY:", API_KEY)
+print("API_SECRET:", API_SECRET)
+
+
 from flask import Flask, request, jsonify
 from binance.client import Client
 import os
