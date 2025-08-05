@@ -4,8 +4,8 @@ import os
 
 app = Flask(__name__)
 
-API_KEY = os.environ.get("API_KEY", "your_api_key_here")
-API_SECRET = os.environ.get("API_SECRET", "your_api_secret_here")
+API_KEY = os.environ.get("API_KEY", "zcn5fp50x521NLTtUERjJR6sx1BrZZP5trKh2wtPIAKwPkWjdB40OtcKpbTmg2gg")
+API_SECRET = os.environ.get("API_SECRET", "E3P0e3zl8KQPOHrxcdskWZQC6WlPUNijYAaVTaV4bVrhlbTcKtGeJ1TCShUOjobR")
 
 exchange = ccxt.binance({
     'apiKey': API_KEY,
