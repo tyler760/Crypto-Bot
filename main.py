@@ -4,8 +4,8 @@ import time
 import uuid
 import sqlite3
 from datetime import datetime
-from flask import Flask, request, jsonify, render_template
-from binance.spot import Spot  # binance-connector (official), works with Binance.US
+from flask import Flask, request, jsonify
+from binance.spot import Spot  # <-- binance-connector, works for Binance.US
 
 app = Flask(__name__)
 
