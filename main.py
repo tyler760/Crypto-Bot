@@ -15,9 +15,8 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 client = Spot(api_key=API_KEY, api_secret=API_SECRET, base_url="https://api.binance.us")
 
 # ---------- Defaults ----------
-# Use these if qty isn't provided by the alert JSON
 DEFAULT_QTY = {
-    "BTCUSDT": 0.00025,  # small test sizes
+    "BTCUSDT": 0.00025,  # tiny test sizes; adjust as you like
     "ETHUSDT": 0.005
 }
 
@@ -66,12 +65,27 @@ def log_trade(row):
 
 # ---------- Helpers ----------
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,20}$")
+ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT", "BTCUSD", "ETHUSD"}
+
+def normalize_symbol(s: str) -> str:
+    """
+    Accepts TV formats like 'BINANCE:BTCUSDT' or 'BINANCEUS:ETHUSD' and returns
+    a tradable symbol for Binance.US. Also maps USD->USDT if needed.
+    """
+    s = (s or "").strip().upper()
+    if ":" in s:
+        s = s.split(":")[-1].strip()
+    if s not in ALLOWED_SYMBOLS:
+        if s.endswith("USD"):
+            maybe_usdt = s[:-3] + "USDT"
+            if maybe_usdt in {"BTCUSDT", "ETHUSDT"}:
+                s = maybe_usdt
+    return s
 
 def place_market_order_with_fallback(side: str, symbol: str, qty: float):
     """
-    Places a MARKET order. If Binance.US returns a non-JSON body (HTML/404)
-    even though the order fills, recover by fetching the order via our own
-    newClientOrderId.
+    Place a MARKET order. If Binance.US returns a non-JSON body (HTML/404)
+    even though the order fills, recover by fetching via our newClientOrderId.
     """
     client_id = f"tv_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}"
 
@@ -89,7 +103,7 @@ def place_market_order_with_fallback(side: str, symbol: str, qty: float):
         msg = str(e)
         print("Primary order error:", msg)
 
-        # Known Binance.US quirk: sometimes returns HTML '404 Not found' or 'Invalid JSON' though order filled.
+        # Binance.US sometimes returns HTML '404 Not found' or 'Invalid JSON' though the order filled.
         if "Invalid JSON error message" in msg or "404 Not found" in msg or "code=0" in msg:
             try:
                 status = client.get_order(symbol=symbol, origClientOrderId=client_id)
@@ -103,6 +117,14 @@ def place_market_order_with_fallback(side: str, symbol: str, qty: float):
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running (Binance.US)"
+
+@app.route("/health", methods=["GET"])
+def health():
+    k = os.getenv("BINANCE_API_KEY", "")
+    s = os.getenv("BINANCE_API_SECRET", "")
+    def mask(v): 
+        return v and (v[:3] + "…" + v[-3:]) or "MISSING"
+    return {"ok": True, "api_key": mask(k), "api_secret": mask(s)}
 
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
@@ -134,11 +156,16 @@ def webhook():
 
         # ---- Basic validations ----
         action = str(data.get("action", "")).upper()
-        symbol = str(data.get("symbol", "")).upper()
+        raw_symbol = str(data.get("symbol", ""))
+        symbol = normalize_symbol(raw_symbol)
+
         if action not in ("BUY", "SELL"):
+            print(f"Rejecting: invalid action '{action}'")
             return jsonify({"error": "Invalid 'action' (use BUY or SELL)"}), 400
-        if not SYMBOL_RE.match(symbol):
-            return jsonify({"error": "Invalid symbol format"}), 400
+
+        if symbol not in ALLOWED_SYMBOLS:
+            print(f"Rejecting: unsupported symbol raw='{raw_symbol}' -> normalized='{symbol}'")
+            return jsonify({"error": f"Unsupported symbol '{raw_symbol}' after normalization -> '{symbol}'"}), 400
 
         # Accept qty if sent, else default by symbol
         qty = data.get("qty", data.get("quantity", None))
@@ -151,7 +178,7 @@ def webhook():
         except Exception:
             return jsonify({"error": "Invalid qty"}), 400
 
-        # Optional passthroughs (for logging)
+        # Optional passthroughs (for logging only)
         entry_price = float(data.get("entry_price", 0) or 0)
         sl_price    = float(data.get("sl_price", 0) or 0)
         tp_price    = float(data.get("tp_price", 0) or 0)
