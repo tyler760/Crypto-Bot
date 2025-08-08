@@ -4,8 +4,8 @@ import time
 import uuid
 import sqlite3
 from datetime import datetime
-from flask import Flask, request, jsonify
-from binance.spot import Spot  # <-- binance-connector, works for Binance.US
+from flask import Flask, request, jsonify, render_template
+from binance.spot import Spot  # binance-connector (official), works with Binance.US
 
 app = Flask(__name__)
 
@@ -13,6 +13,13 @@ app = Flask(__name__)
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 client = Spot(api_key=API_KEY, api_secret=API_SECRET, base_url="https://api.binance.us")
+
+# ---------- Defaults ----------
+# Use these if qty isn't provided by the alert JSON
+DEFAULT_QTY = {
+    "BTCUSDT": 0.00025,  # small test sizes
+    "ETHUSDT": 0.005
+}
 
 # ---------- SQLite setup ----------
 DB_FILE = "trades.db"
@@ -114,29 +121,74 @@ def logs():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # Log the raw incoming payload for debugging
+        # ---- Log raw + parsed for debugging ----
         raw_data = request.get_data(as_text=True)
         print("=== RAW WEBHOOK PAYLOAD ===")
         print(raw_data)
         print("===========================")
 
-        # Attempt to parse JSON
-        data = request.get_json(force=True)
+        data = request.get_json(force=True, silent=False)
         print("=== PARSED JSON DATA ===")
         print(data)
         print("========================")
 
-        # Check required fields
-        if not all(k in data for k in ("action", "symbol")):
-            return jsonify({"error": "Missing required fields"}), 400
+        # ---- Basic validations ----
+        action = str(data.get("action", "")).upper()
+        symbol = str(data.get("symbol", "")).upper()
+        if action not in ("BUY", "SELL"):
+            return jsonify({"error": "Invalid 'action' (use BUY or SELL)"}), 400
+        if not SYMBOL_RE.match(symbol):
+            return jsonify({"error": "Invalid symbol format"}), 400
 
-        # Continue with your Binance logic here...
-        return jsonify({"success": True}), 200
+        # Accept qty if sent, else default by symbol
+        qty = data.get("qty", data.get("quantity", None))
+        if qty is None:
+            qty = DEFAULT_QTY.get(symbol, 0.001)
+        try:
+            qty = float(qty)
+            if qty <= 0:
+                raise ValueError()
+        except Exception:
+            return jsonify({"error": "Invalid qty"}), 400
+
+        # Optional passthroughs (for logging)
+        entry_price = float(data.get("entry_price", 0) or 0)
+        sl_price    = float(data.get("sl_price", 0) or 0)
+        tp_price    = float(data.get("tp_price", 0) or 0)
+
+        # ---- Place order with resilient fallback ----
+        res = place_market_order_with_fallback(action, symbol, qty)
+
+        # ---- Log to DB ----
+        log_trade({
+            "action": action,
+            "symbol": symbol,
+            "qty": qty,
+            "entry_price": entry_price,
+            "sl_price": sl_price,
+            "tp_price": tp_price,
+            "status": "success" if res.get("ok") else "error",
+            "error": "" if res.get("ok") else res.get("error", ""),
+            "client_id": res.get("client_id", ""),
+            "note": res.get("note", "")
+        })
+
+        if res.get("ok"):
+            return jsonify({
+                "success": True,
+                "client_id": res.get("client_id"),
+                "note": res.get("note", ""),
+                "order": res.get("order")
+            }), 200
+        else:
+            return jsonify({
+                "error": res.get("error", "Unknown error"),
+                "client_id": res.get("client_id", "")
+            }), 502
 
     except Exception as e:
         print("Webhook Error:", e)
         return jsonify({"error": str(e)}), 400
-
 
 # ---------- Entry point ----------
 if __name__ == "__main__":
