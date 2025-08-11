@@ -45,7 +45,7 @@ def log_trade(row):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
             """INSERT INTO trades 
-               (action, symbol, qty, entry_price, sl_price, tp_price, timestamp, status, error, client_id, note) 
+               (action, symbol, qty, entry_price, sl_price, tp_price, timestamp, status, error, client_id, note)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 row.get("action"),
@@ -63,22 +63,31 @@ def log_trade(row):
         )
 
 # ---------- Helpers ----------
-SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,20}$")
-ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}
-DEFAULT_QTY = {"BTCUSDT": 0.001, "ETHUSDT": 0.01}
+ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}  # what your bot will trade
+DEFAULT_QTY = { "BTCUSDT": 0.00025, "ETHUSDT": 0.005 }  # tiny test sizes
 
 def normalize_symbol(raw_symbol: str) -> str:
-    """Normalize TradingView 'BTCUSDT' or 'BINANCE:BTCUSDT' to plain 'BTCUSDT'."""
+    """
+    Accepts TradingView formats like 'BINANCE:BTCUSDT', 'BTC/USDT', or 'BTCUSDT'
+    and returns a clean Binance.US symbol.
+    """
     if not raw_symbol:
         return ""
-    s = raw_symbol.upper().replace("BINANCE:", "")
-    s = s.replace("/", "")  # Just in case "BTC/USDT"
+    s = raw_symbol.strip().upper()
+    if ":" in s:
+        s = s.split(":")[-1].strip()
+    s = s.replace("/", "")
+    # Map USD -> USDT if needed
+    if s not in ALLOWED_SYMBOLS and s.endswith("USD"):
+        maybe = s[:-3] + "USDT"
+        if maybe in ALLOWED_SYMBOLS:
+            s = maybe
     return s
 
 def place_market_order_with_fallback(side: str, symbol: str, qty: float):
     """
-    Places a MARKET order. If Binance.US returns a non-JSON body (HTML/404)
-    even though the order fills, recover by fetching the order via our own newClientOrderId.
+    Place a MARKET order. If Binance.US returns a non-JSON body (HTML/404)
+    even though the order fills, recover by fetching via newClientOrderId.
     """
     client_id = f"tv_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}"
 
@@ -96,7 +105,7 @@ def place_market_order_with_fallback(side: str, symbol: str, qty: float):
         msg = str(e)
         app.logger.error("Primary order error: %s", msg)
 
-        # Known Binance.US quirk: sometimes returns HTML '404 Not found' or 'Invalid JSON' though order filled.
+        # Binance.US sometimes returns HTML/invalid JSON while the order actually filled.
         if "Invalid JSON error message" in msg or "404 Not found" in msg or "code=0" in msg:
             try:
                 status = client.get_order(symbol=symbol, origClientOrderId=client_id)
@@ -110,6 +119,14 @@ def place_market_order_with_fallback(side: str, symbol: str, qty: float):
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running (Binance.US)"
+
+@app.route("/health", methods=["GET"])
+def health():
+    k = os.getenv("BINANCE_API_KEY", "")
+    s = os.getenv("BINANCE_API_SECRET", "")
+    def mask(v): 
+        return v and (v[:3] + "…" + v[-3:]) or "MISSING"
+    return {"ok": True, "api_key": mask(k), "api_secret": mask(s)}
 
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
@@ -128,12 +145,12 @@ def logs():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # Log headers + raw payload
+        # ---- Log headers + raw payload (keep cache enabled so JSON parse still works) ----
         app.logger.warning("TV HEADERS: %s", dict(request.headers))
-        raw_data = request.get_data(cache=False, as_text=True)
+        raw_data = request.get_data(as_text=True)  # DO NOT pass cache=False
         app.logger.warning("TV RAW: %s", raw_data)
 
-        # Parse JSON (show decode errors)
+        # ---- Parse JSON ----
         try:
             data = request.get_json(force=True, silent=False)
         except Exception as e:
@@ -142,7 +159,7 @@ def webhook():
 
         app.logger.warning("TV JSON: %s", data)
 
-        # Validate & normalize
+        # ---- Basic validations ----
         action = str(data.get("action", "")).upper()
         raw_symbol = str(data.get("symbol", ""))
         symbol = normalize_symbol(raw_symbol)
@@ -155,6 +172,7 @@ def webhook():
             app.logger.error("Reject: unsupported symbol raw='%s' -> '%s'", raw_symbol, symbol)
             return jsonify({"error": f"Unsupported symbol '{raw_symbol}' after normalization -> '{symbol}'"}), 400
 
+        # ---- Quantity ----
         qty = data.get("qty", data.get("quantity"))
         if qty is None:
             qty = DEFAULT_QTY.get(symbol, 0.001)
@@ -165,12 +183,15 @@ def webhook():
             app.logger.error("Reject: invalid qty '%s'", data.get("qty"))
             return jsonify({"error": "Invalid qty"}), 400
 
+        # ---- Optional passthroughs (for logging only) ----
         entry_price = float(data.get("entry_price", 0) or 0)
         sl_price    = float(data.get("sl_price", 0) or 0)
         tp_price    = float(data.get("tp_price", 0) or 0)
 
-        # Place order
+        # ---- Place order ----
         res = place_market_order_with_fallback(action, symbol, qty)
+
+        # ---- Log trade to SQLite ----
         log_trade({
             "action": action, "symbol": symbol, "qty": qty,
             "entry_price": entry_price, "sl_price": sl_price, "tp_price": tp_price,
