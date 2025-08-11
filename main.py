@@ -63,8 +63,8 @@ def log_trade(row):
         )
 
 # ---------- Helpers ----------
-ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}  # what your bot will trade
-DEFAULT_QTY = { "BTCUSDT": 0.00025, "ETHUSDT": 0.005 }  # tiny test sizes
+ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}              # Symbols you allow
+DEFAULT_QTY     = {"BTCUSDT": 0.00025, "ETHUSDT": 0.005}  # Tiny test sizes
 
 def normalize_symbol(raw_symbol: str) -> str:
     """
@@ -77,7 +77,7 @@ def normalize_symbol(raw_symbol: str) -> str:
     if ":" in s:
         s = s.split(":")[-1].strip()
     s = s.replace("/", "")
-    # Map USD -> USDT if needed
+    # Map USD -> USDT if allowed
     if s not in ALLOWED_SYMBOLS and s.endswith("USD"):
         maybe = s[:-3] + "USDT"
         if maybe in ALLOWED_SYMBOLS:
@@ -105,7 +105,7 @@ def place_market_order_with_fallback(side: str, symbol: str, qty: float):
         msg = str(e)
         app.logger.error("Primary order error: %s", msg)
 
-        # Binance.US sometimes returns HTML/invalid JSON while the order actually filled.
+        # Binance.US sometimes returns HTML/invalid JSON while order actually filled.
         if "Invalid JSON error message" in msg or "404 Not found" in msg or "code=0" in msg:
             try:
                 status = client.get_order(symbol=symbol, origClientOrderId=client_id)
@@ -145,9 +145,9 @@ def logs():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # ---- Log headers + raw payload (keep cache enabled so JSON parse still works) ----
+        # ---- Log headers + raw payload (cache ON so JSON parse still works) ----
         app.logger.warning("TV HEADERS: %s", dict(request.headers))
-        raw_data = request.get_data(as_text=True)  # DO NOT pass cache=False
+        raw_data = request.get_data(as_text=True)  # keep default cache=True
         app.logger.warning("TV RAW: %s", raw_data)
 
         # ---- Parse JSON ----
@@ -159,14 +159,24 @@ def webhook():
 
         app.logger.warning("TV JSON: %s", data)
 
-        # ---- Basic validations ----
+        # ---- Handle non-trade diagnostics first ----
+        if data.get("ping") is True:
+            app.logger.info("PING ok: %s", data)
+            return jsonify({"ok": True, "note": "pong"}), 200
+
+        if "debug" in data:
+            app.logger.info("DEBUG msg: %s", data)
+            return jsonify({"ok": True, "note": "debug received"}), 200
+
+        # ---- Actionable trades only below ----
         action = str(data.get("action", "")).upper()
         raw_symbol = str(data.get("symbol", ""))
         symbol = normalize_symbol(raw_symbol)
 
+        # If no BUY/SELL action -> acknowledge but ignore (prevents TV showing failures)
         if action not in ("BUY", "SELL"):
-            app.logger.error("Reject: bad action '%s'", action)
-            return jsonify({"error": "Invalid 'action' (use BUY or SELL)"}), 400
+            app.logger.info("Non-trade payload ignored: %s", data)
+            return jsonify({"ok": True, "note": "ignored (no BUY/SELL)"}), 200
 
         if symbol not in ALLOWED_SYMBOLS:
             app.logger.error("Reject: unsupported symbol raw='%s' -> '%s'", raw_symbol, symbol)
