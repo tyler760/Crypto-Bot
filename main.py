@@ -221,6 +221,14 @@ def webhook():
         app.logger.exception("Webhook fatal error")
         return jsonify({"error": str(e)}), 400
 
+@app.route("/env-debug")
+def env_debug():
+    keys = ["BINANCE_API_KEY", "BINANCE_API_SECRET", "PYTHONUNBUFFERED"]
+    def mask(v): 
+        return v and (v[:3] + "…" + v[-3:]) or "MISSING"
+    seen = {k: mask(os.getenv(k)) for k in keys}
+    return {"seen": seen, "all_keys_present": [k for k in os.environ.keys()]}
+
 # ---------- Entry point ----------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
