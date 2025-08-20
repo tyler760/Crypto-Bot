@@ -1,5 +1,6 @@
 import os
 import re
+import sys  # <-- added
 import time
 import uuid
 import sqlite3
@@ -10,7 +11,18 @@ from binance.spot import Spot  # binance-connector (official), works with Binanc
 
 # ---------- Flask app & logging ----------
 app = Flask(__name__)
-logging.basicConfig(level=logging.DEBUG)
+
+# Replace basicConfig with an explicit stdout StreamHandler so Render sees logs even when not open
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+root = logging.getLogger()
+root.handlers.clear()
+root.addHandler(handler)
+root.setLevel(logging.INFO)  # INFO is a good default; change to DEBUG if you want more detail
+
+# Optionally quiet very noisy werkzeug access logs (uncomment if needed)
+# logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 logger = logging.getLogger("tv-webhook")
 
 # ---------- Binance.US client ----------
@@ -142,8 +154,8 @@ def logs():
         ).fetchall()
     return render_template("logs.html", logs=rows)
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
+# Single handler function, mounted at both /webhook and /tv
+def _handle_tv():
     try:
         # ---- Log headers + raw payload (cache ON so JSON parse still works) ----
         app.logger.warning("TV HEADERS: %s", dict(request.headers))
@@ -220,6 +232,14 @@ def webhook():
     except Exception as e:
         app.logger.exception("Webhook fatal error")
         return jsonify({"error": str(e)}), 400
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    return _handle_tv()
+
+@app.route('/tv', methods=['POST'])  # alias endpoint, handy if TV is pointed here
+def tv():
+    return _handle_tv()
 
 @app.route("/env-debug")
 def env_debug():
