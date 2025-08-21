@@ -1,40 +1,45 @@
+# main.py
 import os
 import re
-import sys  # <-- added
+import sys
 import time
 import uuid
 import sqlite3
 import logging
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template
-from binance.spot import Spot  # binance-connector (official), works with Binance.US
+from binance.spot import Spot  # Official binance-connector (works with Binance.US)
 
-# ---------- Flask app & logging ----------
+# =========================
+# Flask app & stdout logging
+# =========================
 app = Flask(__name__)
 
-# Replace basicConfig with an explicit stdout StreamHandler so Render sees logs even when not open
+# Stream logs to stdout so Render captures them regardless of the UI
 handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 root = logging.getLogger()
 root.handlers.clear()
 root.addHandler(handler)
-root.setLevel(logging.INFO)  # INFO is a good default; change to DEBUG if you want more detail
+root.setLevel(logging.INFO)  # set to DEBUG for extra detail
 
-# Optionally quiet very noisy werkzeug access logs (uncomment if needed)
-# logging.getLogger("werkzeug").setLevel(logging.WARNING)
+logger = logging.getLogger("main")
 
-logger = logging.getLogger("tv-webhook")
-
-# ---------- Binance.US client ----------
+# =========================
+# Binance.US client
+# =========================
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 client = Spot(api_key=API_KEY, api_secret=API_SECRET, base_url="https://api.binance.us")
 
-# ---------- SQLite setup ----------
+# =========================
+# SQLite setup
+# =========================
 DB_FILE = "trades.db"
 
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
+        # Trades table (your existing schema)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,9 +56,21 @@ def init_db():
             note TEXT
         )
         """)
+        # Webhook hit log (new) — stores headers/raw/parsed JSON and status
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS webhook_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            path TEXT,
+            headers TEXT,
+            raw TEXT,
+            json TEXT,
+            status_code INTEGER
+        )
+        """)
 init_db()
 
-def log_trade(row):
+def log_trade(row: dict):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
             """INSERT INTO trades 
@@ -74,9 +91,19 @@ def log_trade(row):
             )
         )
 
-# ---------- Helpers ----------
-ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}              # Symbols you allow
-DEFAULT_QTY     = {"BTCUSDT": 0.00025, "ETHUSDT": 0.005}  # Tiny test sizes
+def log_webhook_hit(path: str, headers: dict, raw: str, as_json, status_code: int):
+    """Persist every webhook call so you can audit deliveries even without the Render log UI."""
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(
+            "INSERT INTO webhook_log (ts, path, headers, raw, json, status_code) VALUES (?, ?, ?, ?, ?, ?)",
+            (datetime.utcnow().isoformat(), path, str(headers), raw, str(as_json), int(status_code))
+        )
+
+# =========================
+# Helpers
+# =========================
+ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}                   # Symbols you allow
+DEFAULT_QTY     = {"BTCUSDT": 0.00025, "ETHUSDT": 0.005}   # Tiny test sizes
 
 def normalize_symbol(raw_symbol: str) -> str:
     """
@@ -127,7 +154,9 @@ def place_market_order_with_fallback(side: str, symbol: str, qty: float):
         else:
             return {"ok": False, "error": msg, "client_id": client_id}
 
-# ---------- Routes ----------
+# =========================
+# Routes
+# =========================
 @app.route("/", methods=["GET"])
 def home():
     return "Bot is running (Binance.US)"
@@ -154,30 +183,51 @@ def logs():
         ).fetchall()
     return render_template("logs.html", logs=rows)
 
-# Single handler function, mounted at both /webhook and /tv
+@app.route("/webhook-log")
+def webhook_log():
+    """Simple viewer to see recent webhook deliveries (headers/raw/parsed)."""
+    limit = int(request.args.get("limit", 50))
+    with sqlite3.connect(DB_FILE) as conn:
+        rows = conn.execute(
+            "SELECT ts, path, status_code, substr(headers,1,200), substr(raw,1,200), substr(json,1,200) "
+            "FROM webhook_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    html = ["<h2>Recent Webhook Hits</h2><table border='1' cellpadding='4'>"]
+    html.append("<tr><th>ts (UTC)</th><th>path</th><th>status</th><th>headers</th><th>raw</th><th>json</th></tr>")
+    for ts, path, sc, hdr, raw, js in rows:
+        html.append(f"<tr><td>{ts}</td><td>{path}</td><td>{sc}</td><td><pre>{hdr}</pre></td><td><pre>{raw}</pre></td><td><pre>{js}</pre></td></tr>")
+    html.append("</table>")
+    return "".join(html)
+
+# --- Single handler mounted at both /webhook and /tv ---
 def _handle_tv():
     try:
-        # ---- Log headers + raw payload (cache ON so JSON parse still works) ----
-        app.logger.warning("TV HEADERS: %s", dict(request.headers))
-        raw_data = request.get_data(as_text=True)  # keep default cache=True
-        app.logger.warning("TV RAW: %s", raw_data)
+        # ---- Capture request data up-front (so we can persist regardless of parse result) ----
+        hdrs = dict(request.headers)
+        raw_data = request.get_data(as_text=True)  # cache=True by default, JSON parse still works
 
         # ---- Parse JSON ----
         try:
             data = request.get_json(force=True, silent=False)
         except Exception as e:
             app.logger.error("JSON decode error: %s", e)
+            log_webhook_hit(request.path, hdrs, raw_data, {"error": f"Invalid JSON: {e}"}, 400)
             return jsonify({"error": f"Invalid JSON: {e}"}), 400
 
+        # ---- Diagnostics logging ----
+        app.logger.warning("TV HEADERS: %s", hdrs)
+        app.logger.warning("TV RAW: %s", raw_data)
         app.logger.warning("TV JSON: %s", data)
 
-        # ---- Handle non-trade diagnostics first ----
+        # ---- Non-trade diagnostics (ping / debug) ----
         if data.get("ping") is True:
             app.logger.info("PING ok: %s", data)
+            log_webhook_hit(request.path, hdrs, raw_data, data, 200)
             return jsonify({"ok": True, "note": "pong"}), 200
 
         if "debug" in data:
             app.logger.info("DEBUG msg: %s", data)
+            log_webhook_hit(request.path, hdrs, raw_data, data, 200)
             return jsonify({"ok": True, "note": "debug received"}), 200
 
         # ---- Actionable trades only below ----
@@ -185,13 +235,15 @@ def _handle_tv():
         raw_symbol = str(data.get("symbol", ""))
         symbol = normalize_symbol(raw_symbol)
 
-        # If no BUY/SELL action -> acknowledge but ignore (prevents TV showing failures)
+        # Acknowledge but ignore non-trades (prevents TV showing failures)
         if action not in ("BUY", "SELL"):
             app.logger.info("Non-trade payload ignored: %s", data)
+            log_webhook_hit(request.path, hdrs, raw_data, data, 200)
             return jsonify({"ok": True, "note": "ignored (no BUY/SELL)"}), 200
 
         if symbol not in ALLOWED_SYMBOLS:
             app.logger.error("Reject: unsupported symbol raw='%s' -> '%s'", raw_symbol, symbol)
+            log_webhook_hit(request.path, hdrs, raw_data, data, 400)
             return jsonify({"error": f"Unsupported symbol '{raw_symbol}' after normalization -> '{symbol}'"}), 400
 
         # ---- Quantity ----
@@ -203,6 +255,7 @@ def _handle_tv():
             assert qty > 0
         except Exception:
             app.logger.error("Reject: invalid qty '%s'", data.get("qty"))
+            log_webhook_hit(request.path, hdrs, raw_data, data, 400)
             return jsonify({"error": "Invalid qty"}), 400
 
         # ---- Optional passthroughs (for logging only) ----
@@ -213,7 +266,7 @@ def _handle_tv():
         # ---- Place order ----
         res = place_market_order_with_fallback(action, symbol, qty)
 
-        # ---- Log trade to SQLite ----
+        # ---- Log to trades table ----
         log_trade({
             "action": action, "symbol": symbol, "qty": qty,
             "entry_price": entry_price, "sl_price": sl_price, "tp_price": tp_price,
@@ -222,22 +275,38 @@ def _handle_tv():
             "client_id": res.get("client_id", ""), "note": res.get("note", "")
         })
 
+        # ---- Persist webhook hit and return ----
         if res.get("ok"):
+            out = {"success": True, "client_id": res.get("client_id"), "order": res.get("order")}
             app.logger.info("Order OK: %s %s qty=%s client_id=%s", action, symbol, qty, res.get("client_id"))
-            return jsonify({"success": True, "client_id": res.get("client_id"), "order": res.get("order")}), 200
+            log_webhook_hit(request.path, hdrs, raw_data, data, 200)
+            return jsonify(out), 200
         else:
+            out = {"error": res.get("error", "Unknown error")}
             app.logger.error("Order FAIL: %s", res.get("error"))
-            return jsonify({"error": res.get("error", "Unknown error")}), 502
+            log_webhook_hit(request.path, hdrs, raw_data, data, 502)
+            return jsonify(out), 502
 
     except Exception as e:
         app.logger.exception("Webhook fatal error")
+        # log whatever we have
+        try:
+            hdrs = dict(request.headers)
+        except Exception:
+            hdrs = {}
+        raw = ""
+        try:
+            raw = request.get_data(as_text=True)
+        except Exception:
+            pass
+        log_webhook_hit(request.path if request else "unknown", hdrs, raw, {"error": str(e)}, 400)
         return jsonify({"error": str(e)}), 400
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     return _handle_tv()
 
-@app.route('/tv', methods=['POST'])  # alias endpoint, handy if TV is pointed here
+@app.route('/tv', methods=['POST'])  # alias endpoint (handy if your TV alert uses /tv)
 def tv():
     return _handle_tv()
 
@@ -249,7 +318,10 @@ def env_debug():
     seen = {k: mask(os.getenv(k)) for k in keys}
     return {"seen": seen, "all_keys_present": [k for k in os.environ.keys()]}
 
-# ---------- Entry point ----------
+# =========================
+# Entry point
+# =========================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
+    # For production, prefer Gunicorn (see note below). This is fine for local/dev.
     app.run(host="0.0.0.0", port=port)
