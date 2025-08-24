@@ -1,4 +1,5 @@
 # main.py
+import json
 import os
 import re
 import sys
@@ -210,13 +211,27 @@ def _handle_tv():
         hdrs = dict(request.headers)
         raw_data = request.get_data(as_text=True)  # cache=True by default, JSON parse still works
 
-        # ---- Parse JSON ----
-        try:
-            data = request.get_json(force=True, silent=False)
-        except Exception as e:
-            app.logger.error("JSON decode error: %s", e)
-            log_webhook_hit(request.path, hdrs, raw_data, {"error": f"Invalid JSON: {e}"}, 400)
-            return jsonify({"error": f"Invalid JSON: {e}"}), 400
+hdrs = dict(request.headers)
+raw_data = request.get_data(as_text=True)
+
+data = request.get_json(silent=True)
+if data is None:
+    try:
+        if raw_data and raw_data.strip().startswith("{"):
+            data = json.loads(raw_data)
+        else:
+            data = {}
+    except Exception:
+        data = {}
+
+logger.warning("TV HEADERS: %s", hdrs)
+logger.warning("TV RAW: %s", raw_data)
+logger.warning("TV JSON: %s", data)
+
+if not data:
+    log_webhook_hit(request.path, hdrs, raw_data, {"note": "non-json or empty; acked"}, 200)
+    return jsonify({"ok": True, "note": "non-json or empty; ignored"}), 200
+
 
         # ---- Diagnostics logging ----
         app.logger.warning("TV HEADERS: %s", hdrs)
