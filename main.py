@@ -99,11 +99,15 @@ def log_webhook_hit(path: str, headers: dict, raw: str, as_json, status_code: in
             (datetime.utcnow().isoformat(), path, str(headers), raw, str(as_json), int(status_code))
         )
 
-# =========================
 # Helpers
-# =========================
-ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}                   # Symbols you allow
-DEFAULT_QTY     = {"BTCUSDT": 0.00025, "ETHUSDT": 0.005}   # Tiny test sizes
+ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}  # Symbols you allow
+
+# Fallback sizes used only if the webhook payload does NOT include "qty"
+DEFAULT_QTY = {
+    "BTCUSDT": 0.001,   # was 0.00025
+    "ETHUSDT": 0.02     # was 0.005
+}
+
 
 def normalize_symbol(raw_symbol: str) -> str:
     """
