@@ -105,10 +105,9 @@ ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}  # Symbols you allow
 
 # Fallback sizes used only if the webhook payload does NOT include "qty"
 DEFAULT_QTY = {
-    "BTCUSDT": 0.001,   # was 0.00025
-    "ETHUSDT": 0.02     # was 0.005
+    "BTCUSDT": 0.001,   # updated per your request
+    "ETHUSDT": 0.02
 }
-
 
 def normalize_symbol(raw_symbol: str) -> str:
     """
@@ -211,32 +210,26 @@ def _handle_tv():
         hdrs = dict(request.headers)
         raw_data = request.get_data(as_text=True)  # cache=True by default, JSON parse still works
 
-hdrs = dict(request.headers)
-raw_data = request.get_data(as_text=True)
-
-data = request.get_json(silent=True)
-if data is None:
-    try:
-        if raw_data and raw_data.strip().startswith("{"):
-            data = json.loads(raw_data)
-        else:
-            data = {}
-    except Exception:
-        data = {}
-
-logger.warning("TV HEADERS: %s", hdrs)
-logger.warning("TV RAW: %s", raw_data)
-logger.warning("TV JSON: %s", data)
-
-if not data:
-    log_webhook_hit(request.path, hdrs, raw_data, {"note": "non-json or empty; acked"}, 200)
-    return jsonify({"ok": True, "note": "non-json or empty; ignored"}), 200
-
+        # ---- Tolerant JSON parse (handles plain text gracefully) ----
+        data = request.get_json(silent=True)
+        if data is None:
+            try:
+                if raw_data and raw_data.strip().startswith("{"):
+                    data = json.loads(raw_data)
+                else:
+                    data = {}
+            except Exception:
+                data = {}
 
         # ---- Diagnostics logging ----
         app.logger.warning("TV HEADERS: %s", hdrs)
         app.logger.warning("TV RAW: %s", raw_data)
         app.logger.warning("TV JSON: %s", data)
+
+        # If still empty/non-JSON: acknowledge and ignore
+        if not data:
+            log_webhook_hit(request.path, hdrs, raw_data, {"note": "non-json or empty; acked"}, 200)
+            return jsonify({"ok": True, "note": "non-json or empty; ignored"}), 200
 
         # ---- Non-trade diagnostics (ping / debug) ----
         if data.get("ping") is True:
